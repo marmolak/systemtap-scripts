@@ -1,0 +1,52 @@
+############################################################
+# rlimit_nofile.stp
+# Author: Robin Hack <rhack@redhat.com>
+# This script watches processes being schedulet and which
+# try to allocate file destricpor without luck.
+# This script must run under guru mode, for now.
+############################################################
+
+global failed_calls
+
+# This should be part of task.stp.
+function _task_rlimit:long (task:long, nd_limit)
+{
+    sig = @cast(task, "task_struct", "kernel<linux/sched.h>")->signal;
+    rlimit = @cast(sig, "signal_struct", "kernel<linux/sched.h>")->rlim;
+    return @cast(rlimit, "rlimit", "kernel<linux/sched.h>")[nd_limit]->rlim_cur;
+}
+
+function task_rlimit_nofile:long (task:long)
+{
+    nd_limit = %{ RLIMIT_NOFILE %};
+    return _task_rlimit (task, nd_limit);
+}
+
+probe kernel.trace("sched_wakeup")
+{
+    pid = task_pid($p);
+    name = task_execname($p);
+    open_ds = task_open_file_handles($p);
+    max_ds = task_rlimit_nofile($p);
+    if (failed_calls[name, pid] == "EMFILE") {
+        printf ("%s(%d) open: %d - max: %d Hit: %s\n",
+                name, pid, open_ds, max_ds, failed_calls[name, pid]);
+    }
+}
+
+probe kernel.trace("sched_process_exit")
+{
+    pid = task_pid($p);
+    name = task_execname($p);
+    delete failed_calls[name, pid];
+}
+
+# This is exactly point where all the fun happens
+# This function returns only EMFILE errno.
+probe kernel.function("__alloc_fd@fs/file.c").return
+{
+    if ($return == %{ -EMFILE %})
+    {
+        failed_calls[execname(), pid()] = errno_str($return);
+    }
+}
